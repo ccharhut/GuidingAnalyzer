@@ -16,6 +16,40 @@
         <local:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
         <!-- Retourne True si la chaîne contient le paramètre -->
         <local:StringContainsConverter x:Key="StartsWithConverter"/>
+        <DataTemplate x:Key="FftImpactRow">
+            <Grid Margin="0,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90"/><ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="80"/><ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="70"/><ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding FrequencyMilliHz, StringFormat={}{0:F3} mHz}" Foreground="#64B5F6" FontWeight="Bold" FontSize="11"/>
+                <TextBlock Grid.Column="1" Text="{Binding PeriodSeconds, StringFormat={}{0:F1} s}" Foreground="#FFB74D" FontSize="11"/>
+                <TextBlock Grid.Column="2" Text="{Binding AmplitudeArcsec, StringFormat={}{0:F3} arcsec}" Foreground="#FFEB3B" FontSize="11"/>
+                <TextBlock Grid.Column="3" Text="{Binding RmsContributionArcsec, StringFormat={}{0:F3} arcsec}" Foreground="#80CBC4" FontSize="11"/>
+                <TextBlock Grid.Column="4" Text="{Binding PowerPercent, StringFormat={}{0:F1}%}" Foreground="#80CBC4" FontSize="11"/>
+                <TextBlock Grid.Column="5" Text="{Binding PeakToNoiseRatio, StringFormat={}{0:G3}×}" Foreground="#AAAACC" FontSize="11"/>
+                <TextBlock Grid.Column="6" Text="{Binding Interpretation}" Foreground="#AAAACC" FontSize="10" TextWrapping="Wrap"/>
+            </Grid>
+        </DataTemplate>
+        <DataTemplate x:Key="FftImpactHeader">
+            <Grid Margin="8,4,8,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90"/><ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="80"/><ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="70"/><ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Frequency" Foreground="#AAAACC" FontSize="10"/>
+                <TextBlock Grid.Column="1" Text="Period" Foreground="#AAAACC" FontSize="10"/>
+                <TextBlock Grid.Column="2" Text="Amplitude" Foreground="#AAAACC" FontSize="10"/>
+                <TextBlock Grid.Column="3" Text="RMS est." Foreground="#AAAACC" FontSize="10"/>
+                <TextBlock Grid.Column="4" Text="Power share" Foreground="#AAAACC" FontSize="10" ToolTip="Share of non-DC signal power in the peak's main lobe; not a confidence probability."/>
+                <TextBlock Grid.Column="5" Text="Peak / floor" Foreground="#AAAACC" FontSize="10"/>
+                <TextBlock Grid.Column="6" Text="Possible origin" Foreground="#AAAACC" FontSize="10"/>
+            </Grid>
+        </DataTemplate>
     </UserControl.Resources>
 
     <Grid>
@@ -277,7 +311,7 @@
                                         </Style.Triggers>
                                     </Style>
                                 </ToggleButton.Style>
-                                <TextBlock Text="⇥ Drift Correction" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"/>
+                                <TextBlock Text="⇥ RA Drift Correction" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"/>
                             </ToggleButton>
                             <Button Padding="6,2" FontSize="10" Background="#333355" Foreground="#AAAACC"
                                     BorderThickness="1" BorderBrush="#555577" Cursor="Hand"
@@ -302,11 +336,11 @@
                     <Border Grid.Row="0" Background="#252540" Padding="10,6">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="Mode: " Foreground="#AAAACC" FontSize="11" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <RadioButton Content="Drift-corrected (with PHD2 corrections)"
+                            <RadioButton Content="Corrections removed (unguided estimate)"
                                          IsChecked="{Binding FftShowCorrected, Mode=TwoWay}"
                                          Foreground="#64B5F6" FontSize="11" VerticalAlignment="Center" Margin="0,0,20,0"
                                          GroupName="FftMode"/>
-                            <RadioButton Content="RA Corrections Removed (raw mount)"
+                            <RadioButton Content="Guided residuals (PHD2 active)"
                                          IsChecked="{Binding FftShowUncorrected, Mode=TwoWay}"
                                          Foreground="#FFB74D" FontSize="11" VerticalAlignment="Center"
                                          GroupName="FftMode"/>
@@ -322,7 +356,7 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Drift-corrected -->
+                        <!-- Corrections removed -->
                         <Grid Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}">
                             <oxy:PlotView Model="{Binding FftRaPlot}" Background="#1E1E2E" Margin="4"
                                           x:Name="FftRaPlotView"/>
@@ -331,7 +365,7 @@
                                     BorderThickness="1" BorderBrush="#555577" Cursor="Hand"
                                     Click="ResetFftRaZoom_Click"><TextBlock Text="⟳ Reset"/></Button>
                         </Grid>
-                        <!-- Corrections Removed -->
+                        <!-- Guided residuals -->
                         <Grid Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}">
                             <oxy:PlotView Model="{Binding FftRaUncorrectedPlot}" Background="#1E1E2E" Margin="4"
                                           x:Name="FftRaUncorrPlotView"/>
@@ -345,70 +379,36 @@
                         <Expander Grid.Row="1" Background="#1E1E30" Foreground="White" IsExpanded="True">
                             <Expander.Header>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="Detected RA peaks — " FontSize="11" Foreground="#AAAACC"/>
-                                    <TextBlock Text="Drift-corrected" FontSize="11" Foreground="#64B5F6"
+                                    <TextBlock Text="Dominant RA frequencies — " FontSize="11" Foreground="#AAAACC"/>
+                                    <TextBlock Text="Corrections removed" FontSize="11" Foreground="#64B5F6"
                                                Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}"/>
-                                    <TextBlock Text="Corrections Removed" FontSize="11" Foreground="#FFB74D"
+                                    <TextBlock Text="Guided residuals" FontSize="11" Foreground="#FFB74D"
                                                Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}"/>
                                 </StackPanel>
                             </Expander.Header>
-                            <StackPanel>
+                            <ScrollViewer MaxHeight="160" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                            <StackPanel MinWidth="650">
                                 <!-- En-tête tableau -->
-                                <Grid Margin="8,4,8,2">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="90"/>
-                                        <ColumnDefinition Width="70"/>
-                                        <ColumnDefinition Width="60"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Period" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="1" Text="Amplitude" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="2" Text="Confidence" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="3" Text="Interprétation" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                </Grid>
-                                <!-- Pics Drift-corrected -->
+                                <ContentControl Content="Header" ContentTemplate="{StaticResource FftImpactHeader}"/>
+                                <TextBlock Margin="8,0,8,3" Foreground="#AAAACC" FontSize="10" Text="Ranked by power share: at least 1%, 5× spectral floor and 2 observed cycles. No qualifying peak does not imply no error." TextWrapping="Wrap"/>
+                                <!-- Pics Corrections removed -->
                                 <ItemsControl Margin="8,0"
                                     ItemsSource="{Binding CurrentSession.FftRa.SignificantPeaks}"
                                     Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}">
                                     <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Margin="0,2">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="90"/>
-                                                    <ColumnDefinition Width="70"/>
-                                                    <ColumnDefinition Width="60"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding PeriodSeconds, StringFormat='{}{0:F0} s'}" Foreground="#64B5F6" FontWeight="Bold" FontSize="11"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding AmplitudeArcsec, StringFormat='{}{0:F3}&quot;'}" Foreground="#FFEB3B" FontSize="11"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Confidence, StringFormat='{}{0:P0}'}" Foreground="#80CBC4" FontSize="11"/>
-                                                <TextBlock Grid.Column="3" Text="{Binding Interpretation}" Foreground="#AAAACC" FontSize="10" TextWrapping="Wrap"/>
-                                            </Grid>
-                                        </DataTemplate>
+                                        <StaticResource ResourceKey="FftImpactRow"/>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
-                                <!-- Pics Corrections Removed -->
+                                <!-- Pics Guided residuals -->
                                 <ItemsControl Margin="8,0"
                                     ItemsSource="{Binding CurrentSession.FftRaUncorrected.SignificantPeaks}"
                                     Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}">
                                     <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Margin="0,2">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="90"/>
-                                                    <ColumnDefinition Width="70"/>
-                                                    <ColumnDefinition Width="60"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding PeriodSeconds, StringFormat='{}{0:F0} s'}" Foreground="#FFB74D" FontWeight="Bold" FontSize="11"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding AmplitudeArcsec, StringFormat='{}{0:F3}&quot;'}" Foreground="#FFEB3B" FontSize="11"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Confidence, StringFormat='{}{0:P0}'}" Foreground="#80CBC4" FontSize="11"/>
-                                                <TextBlock Grid.Column="3" Text="{Binding Interpretation}" Foreground="#AAAACC" FontSize="10" TextWrapping="Wrap"/>
-                                            </Grid>
-                                        </DataTemplate>
+                                        <StaticResource ResourceKey="FftImpactRow"/>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </StackPanel>
+                            </ScrollViewer>
                         </Expander>
                     </Grid>
 
@@ -419,7 +419,7 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Drift-corrected -->
+                        <!-- Corrections removed -->
                         <Grid Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}">
                             <oxy:PlotView Model="{Binding FftDecPlot}" Background="#1E1E2E" Margin="4"
                                           x:Name="FftDecPlotView"/>
@@ -428,7 +428,7 @@
                                     BorderThickness="1" BorderBrush="#555577" Cursor="Hand"
                                     Click="ResetFftDecZoom_Click"><TextBlock Text="⟳ Reset"/></Button>
                         </Grid>
-                        <!-- Corrections Removed -->
+                        <!-- Guided residuals -->
                         <Grid Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}">
                             <oxy:PlotView Model="{Binding FftDecUncorrectedPlot}" Background="#1E1E2E" Margin="4"
                                           x:Name="FftDecUncorrPlotView"/>
@@ -442,67 +442,33 @@
                         <Expander Grid.Row="1" Background="#1E1E30" Foreground="White" IsExpanded="True">
                             <Expander.Header>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="Detected DEC peaks — " FontSize="11" Foreground="#AAAACC"/>
-                                    <TextBlock Text="Drift-corrected" FontSize="11" Foreground="#64B5F6"
+                                    <TextBlock Text="Dominant DEC frequencies — " FontSize="11" Foreground="#AAAACC"/>
+                                    <TextBlock Text="Corrections removed" FontSize="11" Foreground="#64B5F6"
                                                Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}"/>
-                                    <TextBlock Text="Corrections Removed" FontSize="11" Foreground="#FFB74D"
+                                    <TextBlock Text="Guided residuals" FontSize="11" Foreground="#FFB74D"
                                                Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}"/>
                                 </StackPanel>
                             </Expander.Header>
-                            <StackPanel>
-                                <Grid Margin="8,4,8,2">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="90"/>
-                                        <ColumnDefinition Width="70"/>
-                                        <ColumnDefinition Width="60"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Period" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="1" Text="Amplitude" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="2" Text="Confidence" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                    <TextBlock Grid.Column="3" Text="Interprétation" Foreground="#666688" FontSize="10" FontWeight="Bold"/>
-                                </Grid>
+                            <ScrollViewer MaxHeight="160" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                            <StackPanel MinWidth="650">
+                                <ContentControl Content="Header" ContentTemplate="{StaticResource FftImpactHeader}"/>
+                                <TextBlock Margin="8,0,8,3" Foreground="#AAAACC" FontSize="10" Text="Ranked by power share: at least 1%, 5× spectral floor and 2 observed cycles. No qualifying peak does not imply no error." TextWrapping="Wrap"/>
                                 <ItemsControl Margin="8,0"
                                     ItemsSource="{Binding CurrentSession.FftDec.SignificantPeaks}"
                                     Visibility="{Binding FftShowCorrected, Converter={StaticResource BoolToVis}}">
                                     <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Margin="0,2">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="90"/>
-                                                    <ColumnDefinition Width="70"/>
-                                                    <ColumnDefinition Width="60"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding PeriodSeconds, StringFormat='{}{0:F0} s'}" Foreground="#FFB74D" FontWeight="Bold" FontSize="11"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding AmplitudeArcsec, StringFormat='{}{0:F3}&quot;'}" Foreground="#FFEB3B" FontSize="11"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Confidence, StringFormat='{}{0:P0}'}" Foreground="#80CBC4" FontSize="11"/>
-                                                <TextBlock Grid.Column="3" Text="{Binding Interpretation}" Foreground="#AAAACC" FontSize="10" TextWrapping="Wrap"/>
-                                            </Grid>
-                                        </DataTemplate>
+                                        <StaticResource ResourceKey="FftImpactRow"/>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                                 <ItemsControl Margin="8,0"
                                     ItemsSource="{Binding CurrentSession.FftDecUncorrected.SignificantPeaks}"
                                     Visibility="{Binding FftShowUncorrected, Converter={StaticResource BoolToVis}}">
                                     <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Grid Margin="0,2">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="90"/>
-                                                    <ColumnDefinition Width="70"/>
-                                                    <ColumnDefinition Width="60"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding PeriodSeconds, StringFormat='{}{0:F0} s'}" Foreground="#FFB74D" FontWeight="Bold" FontSize="11"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding AmplitudeArcsec, StringFormat='{}{0:F3}&quot;'}" Foreground="#FFEB3B" FontSize="11"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Confidence, StringFormat='{}{0:P0}'}" Foreground="#80CBC4" FontSize="11"/>
-                                                <TextBlock Grid.Column="3" Text="{Binding Interpretation}" Foreground="#AAAACC" FontSize="10" TextWrapping="Wrap"/>
-                                            </Grid>
-                                        </DataTemplate>
+                                        <StaticResource ResourceKey="FftImpactRow"/>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </StackPanel>
+                            </ScrollViewer>
                         </Expander>
                     </Grid>
                 </Grid>
@@ -1531,19 +1497,19 @@
 
                                 <!-- Latitude du site -->
                                 <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                                    <TextBlock Text="Site latitude (°N)"
+                                    <TextBlock Text="Site latitude (°; North +, South −)"
                                             Foreground="#AAAACC" FontSize="10" Margin="0,0,0,3"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBox Grid.Column="0"
-                                                Text="{Binding PolarLatitudeDeg, StringFormat=F1, UpdateSourceTrigger=LostFocus}"
+                                        <TextBox x:Name="PolarLatitudeTextBox" Grid.Column="0"
+                                                Text="{Binding PolarLatitudeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                 Background="#1E1E2E" Foreground="White"
                                                 BorderBrush="#3A3A5E" Padding="6,4"
                                                 FontSize="13" FontWeight="Bold"
-                                                ToolTip="Your observation site latitude in degrees North"/>
+                                                ToolTip="Site latitude from -90 to 90. Use a dot for decimals, e.g. 48.8."/>
                                         <TextBlock Grid.Column="1" Text="{Binding PolarLatitudeDisplay}"
                                                 Foreground="#6A9A6A" FontSize="10"
                                                 VerticalAlignment="Center" Margin="8,0,0,0"/>
@@ -1554,17 +1520,16 @@
                                 <StackPanel Grid.Column="1" Margin="0,0,16,0">
                                     <TextBlock Text="Screw sensitivity (arcmin/turn)"
                                             Foreground="#AAAACC" FontSize="10" Margin="0,0,0,3"/>
-                                    <TextBox Text="{Binding PolarArcminPerTurn, StringFormat=F0, UpdateSourceTrigger=LostFocus}"
+                                    <TextBox x:Name="PolarSensitivityTextBox" Text="{Binding PolarArcminPerTurnInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                             Background="#1E1E2E" Foreground="White"
                                             BorderBrush="#3A3A5E" Padding="6,4"
                                             FontSize="13" FontWeight="Bold"
-                                            ToolTip="Arcminutes of correction per full screw turn (azimuth and altitude). Typically 30 arcmin/turn."/>
+                                            ToolTip="Arcminutes per full screw turn, greater than zero. Use a dot for decimals, e.g. 30.5."/>
                                 </StackPanel>
 
                                 <!-- Bouton recalcul -->
-                                <Button Grid.Column="2"
+                                <Button x:Name="PolarRecalculateButton" Grid.Column="2"
                                         Command="{Binding RefreshPolarAlignmentCommand}"
-                                        Click="RefreshPolarAlignment_Click"
                                         Background="#3A7BD5" Foreground="White"
                                         Padding="14,8" BorderThickness="0"
                                         VerticalAlignment="Bottom"
@@ -1871,11 +1836,11 @@
                                     <Border Grid.Column="0" Background="#252535" CornerRadius="4"
                                             Padding="10,8" Margin="0,0,6,0">
                                         <StackPanel>
-                                            <TextBlock Text="South Meridian" Foreground="#FFD54F"
+                                            <TextBlock Text="Meridian" Foreground="#FFD54F"
                                                     FontWeight="Bold" FontSize="11"/>
                                             <TextBlock Text="HA ≈ 0h  |  Dec &lt; 30°"
                                                     Foreground="#AAAACC" FontSize="10" Margin="0,3,0,0"/>
-                                            <TextBlock Text="→ Pure altitude sensitivity"
+                                            <TextBlock Text="→ Azimuth sensitivity"
                                                     Foreground="#6A9A6A" FontSize="10" Margin="0,2,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -1887,7 +1852,7 @@
                                                     FontWeight="Bold" FontSize="11"/>
                                             <TextBlock Text="HA ≈ ±3h à ±5h  |  Dec &lt; 30°"
                                                     Foreground="#AAAACC" FontSize="10" Margin="0,3,0,0"/>
-                                            <TextBlock Text="→ Pure azimuth sensitivity"
+                                            <TextBlock Text="→ Increased altitude sensitivity"
                                                     Foreground="#6A9A6A" FontSize="10" Margin="0,2,0,0"/>
                                         </StackPanel>
                                     </Border>
@@ -1908,7 +1873,7 @@
                                 <!-- Note déclinaison 54° -->
                                 <TextBlock Foreground="#666688" FontSize="10" Margin="0,8,0,0"
                                         TextWrapping="Wrap"
-                                        Text="⚠  High Dec (~54°, like M51): the altitude term becomes quasi-constant regardless of HA — azimuth/altitude separation is less precise. Combining with a session at Dec &lt; 30° greatly improves conditioning."/>
+                                        Text="Prefer targets near the celestial equator, well above the horizon. Different hour angles separate azimuth and altitude. Flexure, backlash and calibration errors can bias a drift estimate."/>
                             </StackPanel>
                         </Border>
 

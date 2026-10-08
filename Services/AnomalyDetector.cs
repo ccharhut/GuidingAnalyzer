@@ -39,7 +39,7 @@ namespace GuidingAnalyzer.Services
                     Description = string.Format("Periodic error detected: amplitude {0:F1} arcsec at {1:F1} min", pePeak.AmplitudeArcsec, pePeak.PeriodMinutes),
                     Recommendation = "Enable PEC correction on your mount. Record PEC with PEMPro or PHD2 PEC Trainer.",
                     MeasuredValue = pePeak.AmplitudeArcsec,
-                    Unit = "arcsec peak-to-peak"
+                    Unit = "arcsec amplitude"
                 });
             }
         }
@@ -50,12 +50,11 @@ namespace GuidingAnalyzer.Services
             double decDrift = Math.Abs(session.Statistics.DecDriftArcsecPerMin);
             if (decDrift > 0.5)
             {
-                string direction = session.Statistics.DecDriftArcsecPerMin > 0 ? "North" : "South";
                 anomalies.Add(new GuidingAnomaly {
                     Type = AnomalyType.PolarAlignmentError,
                     Severity = decDrift > 2.0 ? AnomalySeverity.Error : AnomalySeverity.Warning,
                     Title = "DEC Drift - Probable polar alignment error",
-                    Description = $"DEC drift = {decDrift:F2} arcsec/min towards {direction}",
+                    Description = $"Estimated unguided DEC drift = {decDrift:F2} arcsec/min. Polar error, flexure and backlash can all contribute.",
                     Recommendation = "Use the NINA polar alignment procedure (PA Wizard) or PoleMaster. Aim for < 0.1 arcsec/min.",
                     MeasuredValue = decDrift,
                     Unit = "arcsec/min"

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * MultiSessionService.cs
  * ======================
  * Service responsible for:
@@ -102,17 +102,15 @@ namespace GuidingAnalyzer.Services
                 // FFT (si pas déjà calculée par le VM principal)
                 if (session.FftRa == null && session.RawPoints.Count >= 16)
                 {
-                    double samplingPeriod = session.RawPoints.Count > 1
-                        ? (session.RawPoints[^1].Timestamp - session.RawPoints[0].Timestamp)
-                            .TotalSeconds / (session.RawPoints.Count - 1)
-                        : 1.0;
-                    if (samplingPeriod <= 0) samplingPeriod = 1.0;
-
-                    var raSignal  = session.RawPoints.Select(f => f.RaError).ToArray();
-                    var decSignal = session.RawPoints.Select(f => f.DecError).ToArray();
-
-                    session.FftRa  = _fftService.ComputeFft(raSignal,  samplingPeriod, GuidingAxis.RA);
-                    session.FftDec = _fftService.ComputeFft(decSignal, samplingPeriod, GuidingAxis.Dec);
+                    session.MountCurve = new MountCurveService().ReconstructSession(session);
+                    _fftService.ComputeSessionSpectra(session);
+                    if (session.Statistics != null)
+                    {
+                        var drift = _statsService.ComputeDriftOnMountCurve(session.MountCurve);
+                        session.Statistics.RaDriftArcsecPerMin = drift.RaDriftArcsecPerMin;
+                        session.Statistics.DecDriftArcsecPerMin = drift.DecDriftArcsecPerMin;
+                        _statsService.ComputePecHarmonics(session.Statistics, session.FftRa!);
+                    }
                 }
             }
         }

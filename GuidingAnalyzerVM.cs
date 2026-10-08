@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -20,6 +21,10 @@ namespace GuidingAnalyzer
 {
     public partial class GuidingAnalyzerVM : ObservableObject
     {
+        private int _analysisRevision;
+        private Task _sessionAnalysisTask = Task.CompletedTask;
+        [ObservableProperty] private string _polarLatitudeInput = "48.8";
+        [ObservableProperty] private string _polarArcminPerTurnInput = "30";
         // ── Services ─────────────────────────────────────────────────────────
         private readonly GuidingDataService     _dataService         = new();
         private readonly StatisticsService      _statsService        = new();
@@ -47,7 +52,8 @@ namespace GuidingAnalyzer
 
         partial void OnSelectedSessionChanged(GuidingSession? value)
         {
-            if (value != null) _ = AnalyzeSessionAsync(value);
+            if (value != null) _sessionAnalysisTask = AnalyzeSessionAsync(value);
+            else ++_analysisRevision;
         }
 
         // ── Current session ───────────────────────────────────────────────────
@@ -254,10 +260,10 @@ namespace GuidingAnalyzer
             // OxyPlot forbids the same object being bound to two PlotViews.
             _guidingCurvePlot       = CreateEmptyPlot("PHD2 Guiding Errors");
             _mountCurvePlot         = CreateEmptyPlot("Reconstructed Mount Curve");
-            _fftRaPlot              = CreateEmptyPlot("FFT Spectrum — RA (Drift-corrected)");
-            _fftDecPlot             = CreateEmptyPlot("FFT Spectrum — DEC (Drift-corrected)");
-            _fftRaUncorrectedPlot   = CreateEmptyPlot("FFT Spectrum — RA (Corrections Removed)");
-            _fftDecUncorrectedPlot  = CreateEmptyPlot("FFT Spectrum — DEC (Corrections Removed)");
+            _fftRaPlot              = CreateEmptyPlot("FFT Spectrum — RA (Corrections removed)");
+            _fftDecPlot             = CreateEmptyPlot("FFT Spectrum — DEC (Corrections removed)");
+            _fftRaUncorrectedPlot   = CreateEmptyPlot("FFT Spectrum — RA (Guided residuals)");
+            _fftDecUncorrectedPlot  = CreateEmptyPlot("FFT Spectrum — DEC (Guided residuals)");
             _calibrationPlot        = CreateEmptyPlot("Calibration");
             _multiSessionFftRaPlot  = CreateEmptyPlot("FFT RA — Multi-session comparison");
             _multiSessionFftDecPlot = CreateEmptyPlot("FFT DEC — Multi-session comparison");
@@ -287,6 +293,7 @@ namespace GuidingAnalyzer
             // Display only the file name; keep the full path privately
             SelectedFilePath = Path.GetFileName(dlg.FileName);
             _fullFilePath    = dlg.FileName;
+            SelectedSession = null; // invalidate any analysis of the previous file
             IsLoading        = true;
             StatusMessage    = "Loading file…";
 
@@ -314,10 +321,7 @@ namespace GuidingAnalyzer
                     foreach (var s in sessions)
                     {
                         if (s.MountCurve.Count > 0) continue; // already computed
-                        double decRate = (s.SessionInfo?.GuideRateDEC ?? 0) / 1000.0;
-                        s.MountCurve = _mountService.ReconstructMountCurve(
-                            s.RawPoints, s.PixelScale,
-                            s.GuidingRateArcsecPerMs, decRate);
+                        s.MountCurve = _mountService.ReconstructSession(s);
                     }
                 });
 
@@ -327,6 +331,7 @@ namespace GuidingAnalyzer
                 // Multi-session sync will occur after AnalyzeSessionAsync (FFT available).
                 SelectedSession = sessions.OrderByDescending(s => s.RawPoints.Count)
                                           .First();
+                await _sessionAnalysisTask;
             }
             catch (Exception ex)
             {
@@ -396,6 +401,7 @@ namespace GuidingAnalyzer
 
         private async Task AnalyzeSessionAsync(GuidingSession session)
         {
+            int revision = ++_analysisRevision;
             IsLoading     = true;
             StatusMessage = $"Analysing session #{session.SessionIndex} ({session.RawPoints.Count} frames)…";
 
@@ -410,38 +416,20 @@ namespace GuidingAnalyzer
 
                     // Mount curve: uses the rate read from the PHD2 log
                     // (GuidingRateArcsecPerMs = 0 if not found → fallback 0.5× sidereal in MountCurveService)
-                    double decRateArcsecPerMs = (session.SessionInfo?.GuideRateDEC ?? 0) / 1000.0;
-                    session.MountCurve = _mountService.ReconstructMountCurve(
-                        session.RawPoints, session.PixelScale,
-                        session.GuidingRateArcsecPerMs,
-                        decRateArcsecPerMs);
+                    session.MountCurve = _mountService.ReconstructSession(session);
 
-                    if (session.MountCurve.Count > 16)
-                    {
-                        // Filtered signals (no dithers) for "Drift-corrected" FFT
-                        double[] raSignal  = _mountService.GetRaSignal(session.MountCurve);
-                        double[] decSignal = _mountService.GetDecSignal(session.MountCurve);
-
-                        // Signals without PHD2 corrections = raw mount behaviour
-                        double[] raUncorr  = _mountService.GetRaUncorrectedSignal(session.RawPoints);
-                        double[] decUncorr = _mountService.GetDecUncorrectedSignal(session.RawPoints);
-
-                        double samplingPeriod = cleanRawPoints.Count > 1
-                            ? (cleanRawPoints[^1].Timestamp - cleanRawPoints[0].Timestamp)
-                            .TotalSeconds / cleanRawPoints.Count
-                            : 2.5;
-
-                        session.FftRa  = _fftService.ComputeFft(raSignal,  samplingPeriod, GuidingAxis.RA);
-                        session.FftDec = _fftService.ComputeFft(decSignal, samplingPeriod, GuidingAxis.Dec);
-                        session.FftRaUncorrected  = _fftService.ComputeFft(raUncorr,  samplingPeriod, GuidingAxis.RA);
-                        session.FftDecUncorrected = _fftService.ComputeFft(decUncorr, samplingPeriod, GuidingAxis.Dec);
-                    }
+                    _fftService.ComputeSessionSpectra(session);
+                    var drift = _statsService.ComputeDriftOnMountCurve(session.MountCurve);
+                    session.Statistics.RaDriftArcsecPerMin = drift.RaDriftArcsecPerMin;
+                    session.Statistics.DecDriftArcsecPerMin = drift.DecDriftArcsecPerMin;
+                    _statsService.ComputePecHarmonics(session.Statistics, session.FftRa!);
 
                     // Anomaly detection
                     session.Anomalies = _anomalyDetector.Detect(session);
                     session.Advice    = _adviceService.GenerateAdvice(session);
                 });
 
+                if (revision != _analysisRevision) return;
                 // UI updates after Task.Run (UI thread)
                 CurrentSession = session;
                 UpdateStatisticsDisplay(session);
@@ -455,6 +443,8 @@ namespace GuidingAnalyzer
                     await SyncMainFileToComparisonAsync(_fullFilePath,
                         AvailableSessions.ToList());
 
+                if (revision != _analysisRevision) return;
+
                 // RMS vs Altitude analysis
                 UpdateAltitudeAnalysis(session);
 
@@ -466,11 +456,11 @@ namespace GuidingAnalyzer
             }
             catch (Exception ex)
             {
-                StatusMessage = $"Error: {ex.Message}";
+                if (revision == _analysisRevision) StatusMessage = $"Error: {ex.Message}";
             }
             finally
             {
-                IsLoading = false;
+                if (revision == _analysisRevision) IsLoading = false;
             }
         }
 
@@ -606,10 +596,10 @@ namespace GuidingAnalyzer
         {
             GuidingCurvePlot = BuildGuidingCurvePlot(session);
             MountCurvePlot   = BuildMountCurvePlot(session);
-            FftRaPlot        = BuildFftPlot(session.FftRa,             "FFT Spectrum — RA (Drift-corrected)",    OxyColors.SteelBlue);
-            FftDecPlot       = BuildFftPlot(session.FftDec,            "FFT Spectrum — DEC (Drift-corrected)",   OxyColors.Orange);
-            FftRaUncorrectedPlot  = BuildFftPlot(session.FftRaUncorrected,  "FFT Spectrum — RA (Corrections Removed)",  OxyColors.SteelBlue);
-            FftDecUncorrectedPlot = BuildFftPlot(session.FftDecUncorrected, "FFT Spectrum — DEC (Corrections Removed)", OxyColors.Orange);
+            FftRaPlot        = BuildFftPlot(session.FftRa,             "FFT Spectrum — RA (Corrections removed)",    OxyColors.SteelBlue);
+            FftDecPlot       = BuildFftPlot(session.FftDec,            "FFT Spectrum — DEC (Corrections removed)",   OxyColors.Orange);
+            FftRaUncorrectedPlot  = BuildFftPlot(session.FftRaUncorrected,  "FFT Spectrum — RA (Guided residuals)",  OxyColors.SteelBlue);
+            FftDecUncorrectedPlot = BuildFftPlot(session.FftDecUncorrected, "FFT Spectrum — DEC (Guided residuals)", OxyColors.Orange);
             CalibrationPlot  = BuildCalibrationPlot(session.Calibration);
         }
 
@@ -632,6 +622,7 @@ namespace GuidingAnalyzer
             try
             {
                 var result = _polarService.Compute(sessions, PolarLatitudeDeg, PolarArcminPerTurn);
+                PolarLatitudeDisplay = $"{Math.Abs(PolarLatitudeDeg):G}°{(PolarLatitudeDeg < 0 ? "S" : "N")} (user parameter)";
 
                 // ── Sessions table ────────────────────────────────────────────
                 PolarSessionRows.Clear();
@@ -682,7 +673,8 @@ namespace GuidingAnalyzer
                 PolarConditioningColor = result.ConditioningColor;
 
                 // ── RMS residual ──────────────────────────────────────────────
-                PolarResidualText = $"{result.ResidualRmsMasPerMin:F0} mas/min";
+                PolarResidualText = double.IsFinite(result.ResidualRmsMasPerMin)
+                    ? $"{result.ResidualRmsMasPerMin:F0} mas/min" : "N/A (only two sessions)";
 
                 // ── Session counter ───────────────────────────────────────────
                 PolarSessionsText = result.ExcludedCount > 0
@@ -694,7 +686,7 @@ namespace GuidingAnalyzer
                 HasPolarAdvice   = !string.IsNullOrEmpty(result.MeasurementAdvice);
 
                 // ── Latitude display ──────────────────────────────────────────
-                PolarLatitudeDisplay = $"{PolarLatitudeDeg:F1}°N (user parameter)";
+                PolarLatitudeDisplay = $"{Math.Abs(PolarLatitudeDeg):G}°{(PolarLatitudeDeg < 0 ? "S" : "N")} (user parameter)";
 
                 StatusMessage = $"Polar alignment: total error {result.TotalArcmin:F2} arcmin — {result.QualityLabel}";
             }
@@ -868,7 +860,6 @@ namespace GuidingAnalyzer
 
             // ── Optional drift correction ─────────────────────────────────────
             double raSlopePerClean = 0, raIntercept = 0;
-            double decSlopePerClean = 0, decIntercept = 0;
             if (ShowDriftCorrected)
             {
                 var cleanPoints = session.MountCurve.Where(p => !p.IsDitherOrSettling).ToList();
@@ -880,7 +871,7 @@ namespace GuidingAnalyzer
                         int cnt = pts.Count;
                         for (int k = 0; k < cnt; k++)
                         {
-                            double x = k, y = selector(pts[k]);
+                            double x = (pts[k].Timestamp - pts[0].Timestamp).TotalSeconds, y = selector(pts[k]);
                             sumX += x; sumY += y; sumXY += x * y; sumX2 += x * x;
                         }
                         double denom = cnt * sumX2 - sumX * sumX;
@@ -889,12 +880,11 @@ namespace GuidingAnalyzer
                         return (sl, (sumY - sl * sumX) / cnt);
                     }
                     (raSlopePerClean,  raIntercept)  = LinReg(cleanPoints, p => p.RaMountPosition);
-                    (decSlopePerClean, decIntercept) = LinReg(cleanPoints, p => p.DecMountPosition);
                 }
             }
 
             // ── Populate series ───────────────────────────────────────────────
-            int cleanIdx = 0;
+            DateTime driftOrigin = session.MountCurve.FirstOrDefault(q => !q.IsDitherOrSettling)?.Timestamp ?? session.StartTime;
             double lastRaVal = 0;
 
             foreach (var p in session.MountCurve)
@@ -911,14 +901,12 @@ namespace GuidingAnalyzer
                     double dv = p.DecMountPosition;
                     if (ShowDriftCorrected)
                     {
-                        rv -= raSlopePerClean  * cleanIdx + raIntercept;
-                        dv -= decSlopePerClean * cleanIdx + decIntercept;
+                        rv -= raSlopePerClean * (p.Timestamp - driftOrigin).TotalSeconds + raIntercept;
                     }
                     raSeries.Points.Add(new DataPoint(p.FrameIndex, rv));
                     decSeries.Points.Add(new DataPoint(p.FrameIndex, dv));
                     ditherSeries.Points.Add(new DataPoint(p.FrameIndex, double.NaN));
                     lastRaVal = rv;
-                    cleanIdx++;
                 }
             }
 
@@ -933,14 +921,15 @@ namespace GuidingAnalyzer
         private static PlotModel BuildFftPlot(FftResult? fft, string title, OxyColor color)
         {
             var model = CreateDarkPlot(title);
+            var positiveFrequencies = fft?.Frequencies.Skip(1).Where(f => f > 0).ToArray() ?? Array.Empty<double>();
 
             // ── X axis: periods in seconds, LOGARITHMIC scale ─────────────────
             var xAxis = new OxyPlot.Axes.LogarithmicAxis
             {
                 Position           = AxisPosition.Bottom,
-                Title              = "Period (seconds)",
-                Minimum            = 5,
-                Maximum            = 6000,
+                Title              = "Frequency (mHz)",
+                Minimum            = positiveFrequencies.Length > 0 ? positiveFrequencies[0] / 3.6 : 0.1,
+                Maximum            = positiveFrequencies.Length > 0 ? positiveFrequencies[^1] / 3.6 : 500,
                 TextColor          = OxyColors.LightGray,
                 TitleColor         = OxyColors.LightGray,
                 TicklineColor      = OxyColors.Gray,
@@ -978,6 +967,7 @@ namespace GuidingAnalyzer
                 Color           = color,
                 Fill            = OxyColor.FromAColor(55, color),
                 StrokeThickness = 1.2,
+                TrackerFormatString = "Frequency: {2:F3} mHz\nAmplitude: {4:F3} arcsec",
             };
 
             for (int i = 1; i < fft.Frequencies.Length; i++)
@@ -985,8 +975,8 @@ namespace GuidingAnalyzer
                 double freqCph = fft.Frequencies[i];
                 if (freqCph <= 0) continue;
                 double periodSec = 3600.0 / freqCph;
-                if (periodSec < 4 || periodSec > 7200) continue;
-                series.Points.Add(new DataPoint(periodSec, fft.Amplitudes[i]));
+
+                series.Points.Add(new DataPoint(freqCph / 3.6, fft.Amplitudes[i]));
             }
             model.Series.Add(series);
 
@@ -995,18 +985,16 @@ namespace GuidingAnalyzer
             {
                 if (peak.FrequencyCph <= 0) continue;
                 double periodSec = 3600.0 / peak.FrequencyCph;
-                if (periodSec < 4 || periodSec > 7200) continue;
+
 
                 model.Annotations.Add(new LineAnnotation
                 {
                     Type            = LineAnnotationType.Vertical,
-                    X               = periodSec,
+                    X               = peak.FrequencyMilliHz,
                     Color           = OxyColors.Yellow,
                     LineStyle       = LineStyle.Dash,
                     StrokeThickness = 1,
-                    Text            = periodSec >= 60
-                        ? $"{periodSec / 60:F1}min  {peak.AmplitudeArcsec:F2}\""
-                        : $"{periodSec:F0}s  {peak.AmplitudeArcsec:F2}\"",
+                    Text = $"{peak.FrequencyMilliHz:F3} mHz | {periodSec:F1} s | {peak.AmplitudeArcsec:F2} arcsec | {peak.PowerPercent:F1}%",
                     TextColor       = OxyColors.Yellow,
                     FontSize        = 9,
                     TextOrientation = AnnotationTextOrientation.Vertical,
@@ -1017,11 +1005,12 @@ namespace GuidingAnalyzer
             // ── Reference lines for known periods ─────────────────────────────
             void AddRefLine(double periodSec, string label, OxyColor refColor)
             {
-                if (periodSec < xAxis.Minimum || periodSec > xAxis.Maximum) return;
+                double frequencyMilliHz = 1000 / periodSec;
+                if (frequencyMilliHz < xAxis.Minimum || frequencyMilliHz > xAxis.Maximum) return;
                 model.Annotations.Add(new LineAnnotation
                 {
                     Type            = LineAnnotationType.Vertical,
-                    X               = periodSec,
+                    X               = frequencyMilliHz,
                     Color           = OxyColor.FromAColor(50, refColor),
                     LineStyle       = LineStyle.Dot,
                     StrokeThickness = 1,
@@ -1196,12 +1185,26 @@ namespace GuidingAnalyzer
         [RelayCommand]
         private void RefreshPolarAlignment()
         {
+            if (!PolarInput.TryParse(PolarLatitudeInput, PolarArcminPerTurnInput,
+                out double latitude, out double sensitivity, out string error))
+            {
+                HasPolarResult = false;
+                HasPolarError = true;
+                PolarErrorText = error;
+                StatusMessage = error;
+                return;
+            }
+            // Commit both parameters together; never calculate with one stale value.
+            PolarLatitudeDeg = latitude;
+            PolarArcminPerTurn = sensitivity;
             UpdatePolarAlignment();
         }
 
         /// <summary>Called by binding when PolarLatitudeDeg or PolarArcminPerTurn change.</summary>
-        partial void OnPolarLatitudeDegChanged(double value)   => UpdatePolarAlignment();
-        partial void OnPolarArcminPerTurnChanged(double value) => UpdatePolarAlignment();
+        partial void OnPolarLatitudeDegChanged(double value)
+            => PolarLatitudeInput = value.ToString("G", CultureInfo.InvariantCulture);
+        partial void OnPolarArcminPerTurnChanged(double value)
+            => PolarArcminPerTurnInput = value.ToString("G", CultureInfo.InvariantCulture);
 
         // ─────────────────────────────────────────────────────────────────────
         // MULTI-SESSION — MAIN FILE SYNC
@@ -1274,11 +1277,11 @@ namespace GuidingAnalyzer
             model.Axes.Add(new LogarithmicAxis
             {
                 Position           = AxisPosition.Bottom,
-                Title              = "Period (s)",
+                Title              = "Frequency (mHz)",
                 TextColor          = OxyColors.LightGray,
                 TicklineColor      = OxyColors.Gray,
-                Minimum            = 10,
-                Maximum            = 7200,
+                Minimum            = spectra.SelectMany(s => s.Frequencies).Where(f => f > 0).DefaultIfEmpty(.0001).Min() * 1000,
+                Maximum            = spectra.SelectMany(s => s.Frequencies).Where(f => f > 0).DefaultIfEmpty(.5).Max() * 1000,
                 MajorGridlineStyle = LineStyle.Dot,
                 MajorGridlineColor = OxyColor.FromAColor(40, OxyColors.Gray),
             });
@@ -1317,7 +1320,7 @@ namespace GuidingAnalyzer
                     Color           = color,
                     StrokeThickness = 1.2,
                     RenderInLegend  = false,
-                    TrackerFormatString = "{0}\nPeriod: {2:F0} s\nAmplitude: {4:F3}\"",
+                    TrackerFormatString = "{0}\nFrequency: {2:F3} mHz\nAmplitude: {4:F3}\"",
                 };
 
                 for (int j = 0; j < spec.Frequencies.Length; j++)
@@ -1325,8 +1328,7 @@ namespace GuidingAnalyzer
                     double freqHz = spec.Frequencies[j];
                     if (freqHz <= 0) continue;
                     double periodS = 1.0 / freqHz;
-                    if (periodS < 10 || periodS > 7200) continue;
-                    series.Points.Add(new DataPoint(periodS, spec.Amplitudes[j]));
+                    series.Points.Add(new DataPoint(freqHz * 1000, spec.Amplitudes[j]));
                 }
 
                 model.Series.Add(series);

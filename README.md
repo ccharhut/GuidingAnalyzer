@@ -7,6 +7,18 @@
 **Advanced PHD2 Guiding Log Analyzer for N.I.N.A.**
 A comprehensive plugin for analyzing PHD2 guiding logs with **FFT spectrum analysis, anomaly detection, polar alignment estimation, and actionable recommendations** to improve your astrophotography guiding performance.
 
+Version **1.0.0.4** is prepared for user validation. See [corrections, tests and installation instructions](Docs/Validation-1.0.0.4.md). RA reconstruction matches 1.0.0.2 exactly; the correction of 1.0.0.3 applies only to DEC. In Polar Alignment, enter decimal values with a **dot**, then click **Recalculate** to apply both fields. Polar estimates require known session coordinates and DEC parity.
+
+Build and test without changing your NINA installation:
+
+```powershell
+dotnet test Tests/GuidingAnalyzer.Tests.csproj -c Release
+dotnet build GuidingAnalyzer.csproj -c Release
+./scripts/Package-Plugin.ps1
+```
+
+Packages are written to `artifacts/`. The `preview.zip` contains the compiled plugin and dependencies; `sources.zip` contains the source code. Opt-in local deployment uses `-p:DeployPluginToNina=true`.
+
 ---
 
 ## 🌟 Features
@@ -18,8 +30,8 @@ A comprehensive plugin for analyzing PHD2 guiding logs with **FFT spectrum analy
 
 ### 🔍 **Advanced Diagnostics**
 - **FFT Spectrum Analysis**:
-  - Drift-corrected and uncorrected modes.
-  - Identify **periodic error, backlash, vibrations, and worm gear artifacts**.
+  - Corrections-removed estimates and guided residuals, with RA-only linear detrending; DEC drift is preserved.
+  - Full frequency spectra and dominant-frequency tables with period, amplitude, estimated RMS and power share. Possible mechanical origins require confirmation.
   - Multi-session comparison with overlaid FFT spectra.
 - **Worm Gear Period Estimation**: Automatic detection with confidence scoring.
 - **Polar Alignment Error Estimation**: Calculate Az/Alt errors in arcminutes and screw turns.
@@ -62,13 +74,13 @@ Detects and flags common guiding issues:
 
 ### **Manual Installation**
 1. **Download** the latest release from [GitHub Releases](https://github.com/jphf007/GuidingAnalyzer/releases).
-2. **Copy** the `NINA.Plugin.GuidingAnalyzer.dll` and `plugin.json` files to:
+2. **Extract all files** from the compiled plugin ZIP, including its dependency DLLs, to:
 
 
 
+```text
 %LOCALAPPDATA%\NINA\Plugins\3.0.0\GuidingAnalyzer\
-text
-Copier
+```
 
 3. **Restart NINA** to load the plugin.
 

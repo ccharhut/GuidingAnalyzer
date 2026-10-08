@@ -272,8 +272,7 @@ namespace GuidingAnalyzer.Services
             double period  = 3600.0 / bFreq;
             double noise   = Median(fft.Amplitudes.Skip(1).ToArray());
             double snr     = noise > 1e-10 ? bAmp / noise : 0;
-            var    clean   = best.RawPoints.Where(p => !p.IsDitherOrSettling).ToList();
-            double dur     = clean.Count > 1 ? (clean[^1].Timestamp - clean[0].Timestamp).TotalSeconds : 0;
+            double dur = Math.Max(0, fft.PointCount - 1) * fft.SamplingPeriodSeconds;
             double cycles  = period > 0 ? dur / period : 0;
             double phd2    = best.SessionInfo?.PecPeriodLength ?? 0;
             bool   cohPec  = phd2 > 0 && period / phd2 is >= 0.85 and <= 1.15;
@@ -302,7 +301,7 @@ namespace GuidingAnalyzer.Services
                 SnrRatio = snr, CyclesCovered = cycles, ConfidencePercent = conf,
                 ConfidenceLabel = lbl, ConfidenceColor = col, ConfidenceDetail = sb.ToString().Trim(),
                 ConsistentWithPhd2 = cohPec,
-                SourceSessionLabel = $"{best.StartTime:HH:mm} Sess.{best.SessionIndex} ({clean.Count} fr.)",
+                SourceSessionLabel = $"{best.StartTime:HH:mm} Sess.{best.SessionIndex} ({fft.PointCount} fr.)",
             };
         }
 

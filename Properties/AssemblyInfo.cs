@@ -6,8 +6,8 @@ using System.Runtime.InteropServices;
 [assembly: Guid("A1B2C3D4-E5F6-7890-ABCD-EF1234567890")]
 
 // [MANDATORY] The assembly versioning — increment for each new release build
-[assembly: AssemblyVersion("1.0.0.1")]
-[assembly: AssemblyFileVersion("1.0.0.1")]
+[assembly: AssemblyVersion("1.0.0.4")]
+[assembly: AssemblyFileVersion("1.0.0.4")]
 
 // [MANDATORY] The name of your plugin (used as the plugin folder name by NINA)
 [assembly: AssemblyTitle("GuidingAnalyzer")]
@@ -53,9 +53,9 @@ using System.Runtime.InteropServices;
 
 [assembly: AssemblyMetadata("License",          "GPL-3.0")]
 [assembly: AssemblyMetadata("LicenseURL",       "https://www.gnu.org/licenses/gpl-3.0.html")]
-[assembly: AssemblyMetadata("Repository",       "https://github.com/jph/GuidingAnalyzer")]
-[assembly: AssemblyMetadata("ChangelogURL",     "https://github.com/jph/GuidingAnalyzer/releases")]
-[assembly: AssemblyMetadata("Homepage",         "https://github.com/jph/GuidingAnalyzer")]
+[assembly: AssemblyMetadata("Repository",       "https://github.com/jphf007/GuidingAnalyzer")]
+[assembly: AssemblyMetadata("ChangelogURL",     "https://github.com/jphf007/GuidingAnalyzer/releases")]
+[assembly: AssemblyMetadata("Homepage",         "https://github.com/jphf007/GuidingAnalyzer")]
 [assembly: AssemblyMetadata("Tags",             "guiding,PHD2,analysis,FFT,polar alignment,periodic error")]
 
 // ── Minimum NINA version ───────────────────────────────────────────────────

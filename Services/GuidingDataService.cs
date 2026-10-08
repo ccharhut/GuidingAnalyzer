@@ -455,6 +455,10 @@ namespace GuidingAnalyzer.Services
                 // PHD2 stores raw distances in pixels → convert to arcsec
                 pt.RaError  = GetDouble(parts, colMap, "RARawDistance",  0) * scale;
                 pt.DecError = GetDouble(parts, colMap, "DECRawDistance", 0) * scale;
+                double raGuide = GetDouble(parts, colMap, "RAGuideDistance", double.NaN);
+                double decGuide = GetDouble(parts, colMap, "DECGuideDistance", double.NaN);
+                if (double.IsFinite(raGuide)) pt.RaGuideDistanceArcsec = raGuide * scale;
+                if (double.IsFinite(decGuide)) pt.DecGuideDistanceArcsec = decGuide * scale;
 
                 // Corrections: duration in ms + direction
                 double raDur  = GetDouble(parts, colMap, "RADuration",  0);
@@ -469,7 +473,9 @@ namespace GuidingAnalyzer.Services
 
                 // ErrorCode = 0 → valid frame
                 int errorCode = GetInt(parts, colMap, "ErrorCode", 0);
-                pt.IsGuideStep = errorCode == 0;
+                string device = GetString(parts, colMap, "mount");
+                pt.IsGuideStep = (errorCode == 0 || errorCode == 1)
+                    && device != "DROP" && device != "AO";
 
                 return pt;
             }

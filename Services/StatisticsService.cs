@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using GuidingAnalyzer.Models;
@@ -180,7 +180,7 @@ namespace GuidingAnalyzer.Services
         public DriftAnalysis ComputeDriftOnMountCurve(List<MountCurvePoint> curve)
         {
             var result = new DriftAnalysis();
-            var clean  = curve.Where(p => !p.IsDitherOrSettling).ToList();
+            var clean = SpectralSampling.LongestSegment(curve);
             if (clean.Count < 10) return result;
 
             double durationMin    = (clean.Last().Timestamp - clean.First().Timestamp).TotalMinutes;
@@ -194,8 +194,9 @@ namespace GuidingAnalyzer.Services
                 double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
                 for (int i = 0; i < n; i++)
                 {
-                    sumX += i; sumY += y[i];
-                    sumXY += i * y[i]; sumX2 += (double)i * i;
+                    double t = (clean[i].Timestamp - clean[0].Timestamp).TotalMinutes;
+                    sumX += t; sumY += y[i];
+                    sumXY += t * y[i]; sumX2 += t * t;
                 }
                 double d = n * sumX2 - sumX * sumX;
                 if (Math.Abs(d) < 1e-10) { driftPerMin = 0; rSquared = 0; confidence = 0; return; }
@@ -203,16 +204,14 @@ namespace GuidingAnalyzer.Services
                 double slope     = (n * sumXY - sumX * sumY) / d;
                 double intercept = (sumY - slope * sumX) / n;
 
-                // Convert slope (arcsec/frame) → arcsec/min
-                double frameIntervalMin = durationMin / Math.Max(1, n - 1);
-                driftPerMin = frameIntervalMin > 0 ? slope / frameIntervalMin : 0;
+                driftPerMin = slope; // regression uses actual elapsed minutes
 
                 // R² = 1 − SS_res / SS_tot
                 double mean  = sumY / n;
                 double ssTot = y.Sum(v => (v - mean) * (v - mean));
                 double ssRes = 0;
                 for (int i = 0; i < n; i++)
-                    ssRes += Math.Pow(y[i] - (slope * i + intercept), 2);
+                    ssRes += Math.Pow(y[i] - (slope * (clean[i].Timestamp - clean[0].Timestamp).TotalMinutes + intercept), 2);
                 rSquared  = ssTot > 1e-10 ? Math.Max(0, 1.0 - ssRes / ssTot) : 0;
                 confidence = rSquared * durationFactor;
             }

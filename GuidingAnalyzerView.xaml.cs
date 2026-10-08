@@ -296,10 +296,5 @@ namespace GuidingAnalyzer
         private void ResetFftDecUncorrZoom_Click(object s, RoutedEventArgs e) => ResetZoom(FftDecUncorrPlotView);
         private void ResetCalibrationZoom_Click(object s, RoutedEventArgs e)  => ResetZoom(CalibrationPlotView);
 
-        private void RefreshPolarAlignment_Click(object s, RoutedEventArgs e)
-        {
-            if (DataContext is GuidingAnalyzerVM vm)
-                vm.RefreshPolarAlignmentCommand.Execute(null);
-        }
     }
 }

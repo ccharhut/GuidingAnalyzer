@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>NINA.Plugin.GuidingAnalyzer</AssemblyName>
     <RootNamespace>GuidingAnalyzer</RootNamespace>
-    <Version>1.0.0.1</Version>
+    <Version>1.0.0.4</Version>
     <Authors>JPH</Authors>
     <Description>Advanced PHD2 guiding analysis plugin for NINA</Description>
     <!-- AssemblyInfo.cs is handwritten — disable auto-generation -->
@@ -18,6 +18,10 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <NoWarn>NU1701</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+  </ItemGroup>
 
   <!-- XAML pages -->
   <ItemGroup>
@@ -49,11 +53,11 @@
   </ItemGroup>
 
   <!--
-    Automatic deployment to NINA after each build.
+    Optional deployment to NINA: opt in with -p:DeployPluginToNina=true.
     Uses AssemblyTitle from the project (GuidingAnalyzer) as the plugin folder name,
     matching the convention used by the NINA plugin manager.
   -->
-  <Target Name="DeployToNina" AfterTargets="Build">
+  <Target Name="DeployToNina" AfterTargets="Build" Condition="'$(DeployPluginToNina)' == 'true'">
     <PropertyGroup>
       <NinaPluginDir>$(LOCALAPPDATA)\NINA\Plugins\3.0.0\GuidingAnalyzer</NinaPluginDir>
     </PropertyGroup>
@@ -64,6 +68,7 @@
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
           DestinationFolder="$(NinaPluginDir)"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OutputPath)plugin.json" DestinationFolder="$(NinaPluginDir)" SkipUnchangedFiles="true" />
 
     <!-- 2. Third-party dependencies (excluding NINA.*, Microsoft.Web.*, Microsoft.Extensions.*) -->
     <ItemGroup>

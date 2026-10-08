@@ -5,152 +5,95 @@ using GuidingAnalyzer.Models;
 
 namespace GuidingAnalyzer.Services
 {
-    /// <summary>
-    /// Reconstruction of the real behavioural curve of the mount.
-    /// PRINCIPLE: Position[n] = Position[n-1] + Error[n] + Correction[n-1]
-    /// Guide rate is read directly from the PHD2 log (RA Guide Speed).
-    /// </summary>
+    /// <summary>Mount reconstruction: preserve the validated v1.0.0.2 RA convention; DEC adds prior corrective distances.</summary>
     public class MountCurveService
     {
-        // Reference sidereal rate = 15.04 arcsec/s = 0.01504 arcsec/ms
-        // Used ONLY as fallback if the log does not contain RA Guide Speed
-        private const double SIDEREAL_ARCSEC_PER_MS    = 0.01504;
-        private const double DEFAULT_GUIDE_RATE_FACTOR  = 0.5;
-        private const double FALLBACK_RATE_ARCSEC_PER_MS = SIDEREAL_ARCSEC_PER_MS * DEFAULT_GUIDE_RATE_FACTOR;
-
-        /// <param name="guideRateArcsecPerMs">
-        /// RA guide rate in arcsec/ms, read from PHD2 (RA Guide Speed / 1000).
-        /// E.g. PHD2 "7.5 a-s/s" → 0.0075 arcsec/ms.
-        /// If 0, falls back to 0.5× sidereal.
-        /// </param>
-        /// <param name="decGuideRateArcsecPerMs">
-        /// DEC guide rate in arcsec/ms, read from PHD2 (Dec Guide Speed / 1000).
-        /// If 0, uses the same value as RA.
-        /// </param>
-        public List<MountCurvePoint> ReconstructMountCurve(
-            List<GuidingPoint> points, double pixelScale,
-            double guideRateArcsecPerMs    = 0,
-            double decGuideRateArcsecPerMs = 0)
+        private const double FallbackRate = 0.01504 * 0.5;
+        public List<MountCurvePoint> ReconstructSession(GuidingSession session)
         {
+            var info = session.SessionInfo;
+            // Current calibrated rates already include the RA declination projection.
+            double raRate = info != null && info.MountXRate > 0
+                ? info.MountXRate * session.PixelScale / 1000 : session.GuidingRateArcsecPerMs;
+            double decRate = info != null && info.MountYRate > 0
+                ? info.MountYRate * session.PixelScale / 1000 : (info?.GuideRateDEC ?? 0) / 1000;
+            return ReconstructMountCurve(session.RawPoints, session.PixelScale, raRate, decRate);
+        }
+
+        private static double AppliedGuide(double? requested, double pulse, double rate, bool knownRate)
+        {
+            if (pulse == 0) return 0;
+            if (requested is double distance && double.IsFinite(distance))
+            {
+                // PHD2 logs the algorithm's requested distance even if max duration limits the pulse.
+                return knownRate ? Math.CopySign(Math.Min(Math.Abs(distance), Math.Abs(pulse) * rate), distance) : distance;
+            }
+            return -pulse * rate;
+        }
+        public List<MountCurvePoint> ReconstructMountCurve(List<GuidingPoint> points, double pixelScale,
+            double guideRateArcsecPerMs = 0, double decGuideRateArcsecPerMs = 0)
+        {
+            double raRate = guideRateArcsecPerMs > 0 ? guideRateArcsecPerMs : FallbackRate;
+            double decRate = decGuideRateArcsecPerMs > 0 ? decGuideRateArcsecPerMs : raRate;
             var curve = new List<MountCurvePoint>(points.Count);
-            if (points.Count == 0) return curve;
-
-            // Use rate from PHD2 log; fall back if not parsed
-            double raRate  = guideRateArcsecPerMs > 0
-                ? guideRateArcsecPerMs
-                : FALLBACK_RATE_ARCSEC_PER_MS;
-            double decRate = decGuideRateArcsecPerMs > 0
-                ? decGuideRateArcsecPerMs
-                : raRate;
-
-            double raCumulative = 0.0, decCumulative = 0.0;
-            double prevRaCorrArcsec = 0.0, prevDecCorrArcsec = 0.0;
-
+            double raGuides = 0, decGuides = 0, raOffset = 0, decOffset = 0;
+            double lastRa = 0, lastDec = 0;
+            bool afterDither = false;
             foreach (var p in points)
             {
-                double raCorrArcsec  = p.RaCorrection  * raRate;
-                double decCorrArcsec = p.DecCorrection * decRate;
-
+                // Retain RA's v1.0.0.2 reconstruction. DEC uses the corrective-distance
+                // convention validated by the recorded DEC pulse regression.
+                double raGuide = AppliedGuide(p.RaGuideDistanceArcsec, p.RaCorrection, raRate, guideRateArcsecPerMs > 0);
+                double decGuide = AppliedGuide(p.DecGuideDistanceArcsec, p.DecCorrection, decRate, decGuideRateArcsecPerMs > 0);
+                bool excluded = p.IsDitherOrSettling || !p.IsGuideStep
+                    || !double.IsFinite(p.RaError) || !double.IsFinite(p.DecError);
                 if (p.IsDitherOrSettling)
                 {
-                    // During a dither/settling: integrate NEITHER the error NOR the correction
-                    // into the cumulative. The mount makes a deliberate jump, not a mechanical defect.
-                    // We "freeze" the position and do not propagate the correction from this step.
-                    curve.Add(new MountCurvePoint {
-                        FrameIndex          = p.FrameIndex,
-                        Timestamp           = p.Timestamp,
-                        RaMountPosition     = raCumulative,
-                        DecMountPosition    = decCumulative,
-                        IsDitherOrSettling  = true,
-                        RaRawError          = p.RaError,
-                        DecRawError         = p.DecError,
-                        RaCorrectionArcsec  = raCorrArcsec,
-                        DecCorrectionArcsec = decCorrArcsec
-                    });
-                    // Do not propagate prevRaCorr/prevDecCorr either
-                    prevRaCorrArcsec  = 0.0;
-                    prevDecCorrArcsec = 0.0;
+                    afterDither = true;
+                    raGuides = decGuides = 0;
                 }
-                else
+                else if (!excluded)
                 {
-                    raCumulative  += p.RaError  + prevRaCorrArcsec;
-                    decCumulative += p.DecError + prevDecCorrArcsec;
-                    curve.Add(new MountCurvePoint {
-                        FrameIndex          = p.FrameIndex,
-                        Timestamp           = p.Timestamp,
-                        RaMountPosition     = raCumulative,
-                        DecMountPosition    = decCumulative,
-                        IsDitherOrSettling  = false,
-                        RaRawError          = p.RaError,
-                        DecRawError         = p.DecError,
-                        RaCorrectionArcsec  = raCorrArcsec,
-                        DecCorrectionArcsec = decCorrArcsec
-                    });
-                    prevRaCorrArcsec  = raCorrArcsec;
-                    prevDecCorrArcsec = decCorrArcsec;
+                    if (afterDither)
+                    {
+                        // New lock position: retain continuity, exclude intentional motion.
+                        raOffset = lastRa - p.RaError;
+                        decOffset = lastDec - p.DecError - decGuides;
+                        afterDither = false;
+                    }
+                    lastRa = p.RaError - raGuides + raOffset;
+                    lastDec = p.DecError + decGuides + decOffset;
+                }
+                curve.Add(new MountCurvePoint {
+                    FrameIndex = p.FrameIndex, Timestamp = p.Timestamp,
+                    RaMountPosition = lastRa, DecMountPosition = lastDec,
+                    IsDitherOrSettling = excluded,
+                    RaRawError = p.RaError, DecRawError = p.DecError,
+                    RaCorrectionArcsec = raGuide, DecCorrectionArcsec = decGuide
+                });
+                // Pulse n acts after measurement n. Rejected frames may still have pulses.
+                if (!p.IsDitherOrSettling)
+                {
+                    raGuides += raGuide;
+                    decGuides += decGuide;
                 }
             }
-            CenterCurve(curve);
+            var valid = curve.Where(p => !p.IsDitherOrSettling).ToList();
+            if (valid.Count > 0)
+            {
+                double raMean = valid.Average(p => p.RaMountPosition);
+                double decMean = valid.Average(p => p.DecMountPosition);
+                foreach (var p in curve) { p.RaMountPosition -= raMean; p.DecMountPosition -= decMean; }
+            }
             return curve;
         }
-
-        private void CenterCurve(List<MountCurvePoint> curve)
-        {
-            if (curve.Count == 0) return;
-            double raMean  = curve.Average(p => p.RaMountPosition);
-            double decMean = curve.Average(p => p.DecMountPosition);
-            foreach (var p in curve)
-            {
-                p.RaMountPosition  -= raMean;
-                p.DecMountPosition -= decMean;
-            }
-        }
-
-        /// <summary>RA signal of the mount curve — dithers excluded (for "Drift-corrected" FFT).</summary>
         public double[] GetRaSignal(List<MountCurvePoint> curve)
             => curve.Where(p => !p.IsDitherOrSettling).Select(p => p.RaMountPosition).ToArray();
-
-        /// <summary>DEC signal of the mount curve — dithers excluded.</summary>
         public double[] GetDecSignal(List<MountCurvePoint> curve)
             => curve.Where(p => !p.IsDitherOrSettling).Select(p => p.DecMountPosition).ToArray();
-
-        /// <summary>
-        /// RA signal without applied corrections = raw mount behaviour.
-        /// Cumulative reconstruction ignoring PHD2 corrections.
-        /// Equivalent to the "RA Corrections Removed" mode in PHD2 Log Viewer.
-        /// </summary>
-        public double[] GetRaUncorrectedSignal(List<GuidingPoint> rawPoints)
-        {
-            var clean = rawPoints.Where(p => !p.IsDitherOrSettling && p.IsGuideStep).ToList();
-            if (clean.Count == 0) return Array.Empty<double>();
-            var result = new double[clean.Count];
-            double cumul = 0;
-            for (int i = 0; i < clean.Count; i++)
-            {
-                cumul += clean[i].RaError;   // accumulate error only, no correction
-                result[i] = cumul;
-            }
-            // Centre
-            double mean = result.Average();
-            for (int i = 0; i < result.Length; i++) result[i] -= mean;
-            return result;
-        }
-
-        /// <summary>DEC signal without corrections.</summary>
-        public double[] GetDecUncorrectedSignal(List<GuidingPoint> rawPoints)
-        {
-            var clean = rawPoints.Where(p => !p.IsDitherOrSettling && p.IsGuideStep).ToList();
-            if (clean.Count == 0) return Array.Empty<double>();
-            var result = new double[clean.Count];
-            double cumul = 0;
-            for (int i = 0; i < clean.Count; i++)
-            {
-                cumul += clean[i].DecError;
-                result[i] = cumul;
-            }
-            double mean = result.Average();
-            for (int i = 0; i < result.Length; i++) result[i] -= mean;
-            return result;
-        }
+        public double[] GetRaUncorrectedSignal(List<GuidingPoint> points)
+            => points.Where(p => p.IsGuideStep && !p.IsDitherOrSettling).Select(p => p.RaError).ToArray();
+        public double[] GetDecUncorrectedSignal(List<GuidingPoint> points)
+            => points.Where(p => p.IsGuideStep && !p.IsDitherOrSettling).Select(p => p.DecError).ToArray();
     }
 }

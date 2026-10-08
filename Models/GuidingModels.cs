@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Models/GuidingModels.cs
  * ========================
  * Defines all data structures for the plugin.
@@ -26,6 +26,8 @@ namespace GuidingAnalyzer.Models
     /// </summary>
     public class GuidingPoint
     {
+        public double? RaGuideDistanceArcsec { get; set; }
+        public double? DecGuideDistanceArcsec { get; set; }
         /// <summary>Sequential frame index (1, 2, 3…)</summary>
         public int FrameIndex { get; set; }
 
@@ -84,20 +86,8 @@ namespace GuidingAnalyzer.Models
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Represents the REAL behaviour of the mount, reconstructed by accumulating
-    /// the measured error plus the corrections already applied.
-    ///
-    /// RECONSTRUCTION PRINCIPLE:
-    /// ─────────────────────────
-    /// PHD2 measures the error AFTER guiding. To recover the intrinsic mount
-    /// behaviour (without corrections), we accumulate:
-    ///
-    ///   MountPos[n] = MountPos[n-1]
-    ///               + Error[n]              (measured drift)
-    ///               + Correction[n-1]       (correction sent at previous step)
-    ///
-    /// This curve reveals periodic error (PE), backlash, vibrations and other
-    /// mechanical behaviours.
+    /// Approximate unguided position: measured error minus previously applied guide
+    /// displacements. Dithers and rejected frames are excluded from analysis.
     /// </summary>
     public class MountCurvePoint
     {
@@ -173,6 +163,13 @@ namespace GuidingAnalyzer.Models
     {
         /// <summary>Peak frequency (cycles/hour)</summary>
         public double FrequencyCph { get; set; }
+        public double FrequencyMilliHz => FrequencyCph / 3.6;
+        /// <summary>Power in the peak's Hann main lobe, relative to total non-DC spectral power.</summary>
+        public double PowerPercent { get; set; }
+        public double RmsContributionArcsec { get; set; }
+        /// <summary>Amplitude divided by median spectral amplitude; a heuristic, not a probability.</summary>
+        public double PeakToNoiseRatio { get; set; }
+        public double CyclesObserved { get; set; }
 
         /// <summary>Corresponding period (minutes)</summary>
         public double PeriodMinutes => FrequencyCph > 0 ? 60.0 / FrequencyCph : double.MaxValue;
@@ -189,7 +186,7 @@ namespace GuidingAnalyzer.Models
         /// </summary>
         public string Interpretation { get; set; } = string.Empty;
 
-        /// <summary>Confidence level of the interpretation (0–1)</summary>
+        /// <summary>Legacy relative peak prominence (0–1), not interpretation confidence.</summary>
         public double Confidence { get; set; }
     }
 
@@ -354,13 +351,13 @@ namespace GuidingAnalyzer.Models
 
         // Analysis results
         public GuidingStatistics? Statistics { get; set; }
-        /// <summary>FFT of mount curve RA — "Drift-corrected" (with PHD2 corrections)</summary>
+        /// <summary>FFT of estimated unguided RA (guide corrections removed, linear trend removed)</summary>
         public FftResult?         FftRa      { get; set; }
-        /// <summary>FFT of mount curve DEC — "Drift-corrected"</summary>
+        /// <summary>FFT of estimated unguided DEC</summary>
         public FftResult?         FftDec     { get; set; }
-        /// <summary>FFT RA without PHD2 corrections — "RA Corrections Removed"</summary>
+        /// <summary>FFT of measured RA residuals with PHD2 guiding active</summary>
         public FftResult?         FftRaUncorrected  { get; set; }
-        /// <summary>FFT DEC without PHD2 corrections</summary>
+        /// <summary>FFT of measured DEC residuals with PHD2 guiding active</summary>
         public FftResult?         FftDecUncorrected { get; set; }
         public List<GuidingAnomaly> Anomalies { get; set; } = new();
         public List<GuidingAdvice>  Advice    { get; set; } = new();
@@ -442,10 +439,10 @@ namespace GuidingAnalyzer.Models
         public double CalibrationDistancePx { get; set; }
         // Telescope position during calibration
         public double RaHours              { get; set; }
-        public double DecDeg               { get; set; }
-        public double HourAngle            { get; set; }
-        public double AltDeg               { get; set; }
-        public double AzDeg                { get; set; }
+        public double DecDeg               { get; set; } = double.NaN;
+        public double HourAngle            { get; set; } = double.NaN;
+        public double AltDeg               { get; set; } = double.NaN;
+        public double AzDeg                { get; set; } = double.NaN;
         public string PierSide             { get; set; } = string.Empty;
         // Guide speeds
         public double RaGuideSpeedArcsecS  { get; set; }
@@ -547,10 +544,10 @@ namespace GuidingAnalyzer.Models
 
         // ── Sky position ─────────────────────────────────────────────────────
         public double  RaHours             { get; set; }
-        public double  DecDeg              { get; set; }
-        public double  HourAngle           { get; set; }
-        public double  AltDeg              { get; set; }
-        public double  AzDeg               { get; set; }
+        public double  DecDeg              { get; set; } = double.NaN;
+        public double  HourAngle           { get; set; } = double.NaN;
+        public double  AltDeg              { get; set; } = double.NaN;
+        public double  AzDeg               { get; set; } = double.NaN;
         public string  PierSide            { get; set; } = string.Empty;
     }
 

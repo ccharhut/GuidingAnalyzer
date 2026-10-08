@@ -1,35 +1,8 @@
-/*
- * PolarAlignmentService.cs
- * ========================
- * Service de calcul de l'erreur de mise en station polaire.
- *
- * Method: solving the Taki / Bob Denny formula by weighted least squares.
- *
- *   Dec_drift = err_az  × cos(lat) × sin(HA)
- *             + err_alt × [cos(lat) × tan(dec) − sin(lat) × cos(HA)]
- *
- * With N sessions (N ≥ 2), the system is over-determined (N equations, 2 unknowns).
- * We solve AtWA × x = AtWb where W = diag(weights), weight = min(sqrt(frames), 50).
- *
- * Conditioning of matrix A: indicates geometric reliability.
- *   < 50   → Excellent    (very diverse positions)
- *   50-300 → Good         (adequate coverage)
- *   300-1000 → Poor       (sessions too similar)
- *   > 1000 → Unreliable  (near-singular)
- *
- * Results:
- *   - err_az  (arcmin): positive = too far East, negative = too far West
- *   - err_alt (arcmin): positive = too high, negative = too low
- *   - Total   (arcmin): √(az² + alt²)
- *   - Conditioning, residual RMS, number of sessions used
- *   - Quality: Excellent / Good / Fair / Poor
- *   - Measurement advice if conditioning > 300
- */
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using GuidingAnalyzer.Models;
+using MathNet.Numerics.LinearAlgebra;
 
 namespace GuidingAnalyzer.Services
 {
@@ -51,8 +24,9 @@ namespace GuidingAnalyzer.Services
         /// <summary>Erreur altitudinale (arcmin). + = trop haut, − = trop bas.</summary>
         public double ErrAltArcmin { get; set; }
 
-        /// <summary>Erreur totale = √(az² + alt²) en arcmin.</summary>
-        public double TotalArcmin  => Math.Sqrt(ErrAzArcmin * ErrAzArcmin + ErrAltArcmin * ErrAltArcmin);
+        /// <summary>Pole separation: sqrt((az*cos(latitude))² + alt²), arcmin.</summary>
+        public double LatitudeDeg { get; set; }
+        public double TotalArcmin => Math.Sqrt(Math.Pow(ErrAzArcmin * Math.Cos(LatitudeDeg * Math.PI / 180), 2) + ErrAltArcmin * ErrAltArcmin);
 
         // ── Measurement quality ───────────────────────────────────────────────
 
@@ -65,7 +39,7 @@ namespace GuidingAnalyzer.Services
         /// <summary>Nombre de sessions ayant contribué au calcul.</summary>
         public int    SessionCount  { get; set; }
 
-        /// <summary>Nombre de sessions exclues (PPEC apprentissage, drift non fiable).</summary>
+        /// <summary>Sessions excluded for missing metadata or insufficient uninterrupted measurements.</summary>
         public int    ExcludedCount { get; set; }
 
         /// <summary>True si le calcul a pu aboutir (≥ 2 sessions valides).</summary>
@@ -111,10 +85,10 @@ namespace GuidingAnalyzer.Services
         // ── Human-readable directions ────────────────────────────────────────────────
 
         /// <summary>Direction azimut : "Est" ou "Ouest".</summary>
-        public string AzDirection  => ErrAzArcmin  >= 0 ? "towards East"   : "towards West";
+        public string AzDirection => Math.Abs(ErrAzArcmin) < 0.005 ? "No correction" : ErrAzArcmin > 0 ? "Correct towards West" : "Correct towards East";
 
         /// <summary>Direction altitude : "Haut" ou "Bas".</summary>
-        public string AltDirection => ErrAltArcmin >= 0 ? "upwards"  : "downwards";
+        public string AltDirection => Math.Abs(ErrAltArcmin) < 0.005 ? "No correction" : ErrAltArcmin > 0 ? "Correct downwards" : "Correct upwards";
 
         // ── Conversion to screw turns ─────────────────────────────────────────
 
@@ -158,422 +132,145 @@ namespace GuidingAnalyzer.Services
 
         // Résidu après ajustement (arcsec/min)
         public double   Residual      { get; set; }
+        internal double CosHaResponse { get; set; }
+        internal double SinHaResponse { get; set; }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SERVICE
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Small-angle DEC drift model, in physical celestial North coordinates:
+    /// drift[arcsec/min] = -60 * omega[rad/min] * hemisphere *
+    /// (azError[arcmin] * cos(latitude) * cos(HA) +
+    ///  altError[arcmin] * sin(HA)).
+    /// HA is positive west; errors mean polar axis too far East / too high.
+    /// Time-dependent HA is integrated, then regressed like the measured curve.
+    /// PHD2 DEC parity is required to combine signed drifts across pier sides.
+    /// </summary>
     public class PolarAlignmentService
     {
-        // ── Filtering thresholds ─────────────────────────────────────────────────
+        public const double SiderealRadiansPerMinute = 2 * Math.PI / (86164.0905 / 60);
+        private const double DriftPerArcmin = 60 * SiderealRadiansPerMinute;
 
-        /// <summary>Durée minimale de session pour être utilisable (secondes).</summary>
-        private const double MinSessionDurationSec = 120.0;
-
-        /// <summary>Nombre minimum de frames valides.</summary>
-        private const int MinFrames = 30;
-
-        /// <summary>Poids maximum par session (évite qu'une très longue session domine).</summary>
-        private const double MaxWeight = 50.0;
-
-        // ══════════════════════════════════════════════════════════════════════
-        // MAIN ENTRY POINT
-        // ══════════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Computes err_az and err_alt from a list of guiding sessions.
-        /// </summary>
-        /// <param name="sessions">Night sessions (all or filtered).</param>
-        /// <param name="latitudeDeg">Site latitude in degrees (e.g. 48.8 for Île-de-France).</param>
-        /// <param name="arcminPerTurn">Screw sensitivity (arcmin/turn). Default 30.</param>
-        public PolarAlignmentResult Compute(
-            IEnumerable<GuidingSession> sessions,
-            double latitudeDeg,
-            double arcminPerTurn = 30.0)
+        public PolarAlignmentResult Compute(IEnumerable<GuidingSession> sessions,
+            double latitudeDeg, double arcminPerTurn = 30)
         {
-            var result = new PolarAlignmentResult();
-
-            // ── 1. Build session rows ────────────────────────────
-            var rows = BuildSessionRows(sessions.ToList());
-            result.SessionRows = rows;
-
-            var validRows = rows.Where(r => !r.IsExcluded).ToList();
-            result.SessionCount  = validRows.Count;
-            result.ExcludedCount = rows.Count - validRows.Count;
-
-            if (validRows.Count < 2)
+            var result = new PolarAlignmentResult { LatitudeDeg = latitudeDeg,
+                ResidualRmsMasPerMin = double.NaN };
+            if (!double.IsFinite(latitudeDeg) || Math.Abs(latitudeDeg) > 90
+                || !double.IsFinite(arcminPerTurn) || arcminPerTurn <= 0)
             {
-                result.IsValid      = false;
-                result.ErrorMessage = validRows.Count == 0
-                    ? "No usable sessions — sessions too short or missing position metadata."
-                    : "Only one valid session — at least 2 with different positions are required.";
+                result.ErrorMessage = "Invalid latitude or screw sensitivity.";
                 return result;
             }
-
-            // ── 2. Build matrix A and vector b ─────────────────────
-            double latRad = latitudeDeg * Math.PI / 180.0;
-
-            double[] dAz  = new double[validRows.Count];
-            double[] dAlt = new double[validRows.Count];
-            double[] b    = new double[validRows.Count];
-            double[] w    = new double[validRows.Count];
-
-            for (int i = 0; i < validRows.Count; i++)
+            result.SessionRows = sessions.Select(BuildRow).ToList();
+            var rows = result.SessionRows.Where(r => !r.IsExcluded).ToList();
+            result.SessionCount = rows.Count;
+            result.ExcludedCount = result.SessionRows.Count - rows.Count;
+            if (rows.Count < 2)
             {
-                var row   = validRows[i];
-                double ha  = row.HourAngle * Math.PI / 180.0;   // HA en radians (converti depuis heures → degrés → rad)
-                double dec = row.DecDeg    * Math.PI / 180.0;
-
-                // Azimuth term: cos(lat) × sin(HA)
-                dAz[i]  = Math.Cos(latRad) * Math.Sin(ha);
-
-                // Altitude term: cos(lat)×tan(dec) − sin(lat)×cos(HA)
-                // Guard on tan(dec) for Dec near ±90°
-                double tanDec = Math.Abs(dec) < 1.55 ? Math.Tan(dec) : Math.Sign(dec) * 50.0;
-                dAlt[i] = Math.Cos(latRad) * tanDec - Math.Sin(latRad) * Math.Cos(ha);
-
-                b[i]    = row.DecDriftRaw;   // arcsec/min
-                w[i]    = row.Weight;
-            }
-
-            // ── 3. Solve (AtWA)^-1 AtWb ─────────────────────────────────
-            // 2×2 matrix : AtWA = [ Σ w·dAz²     Σ w·dAz·dAlt ]
-            //                      [ Σ w·dAz·dAlt  Σ w·dAlt²   ]
-            double s11 = 0, s12 = 0, s22 = 0, r1 = 0, r2 = 0;
-            for (int i = 0; i < validRows.Count; i++)
-            {
-                s11 += w[i] * dAz[i]  * dAz[i];
-                s12 += w[i] * dAz[i]  * dAlt[i];
-                s22 += w[i] * dAlt[i] * dAlt[i];
-                r1  += w[i] * dAz[i]  * b[i];
-                r2  += w[i] * dAlt[i] * b[i];
-            }
-
-            double det = s11 * s22 - s12 * s12;
-            if (Math.Abs(det) < 1e-12)
-            {
-                result.IsValid      = false;
-                result.ErrorMessage = "Singular system — sessions have too similar positions. " +
-                                      "Observe on a different target (different HA or Dec).";
+                result.ErrorMessage = "At least two usable sessions with different hour angles are required. See exclusion reasons below.";
                 return result;
             }
-
-            // Direct 2×2 solution
-            double errAzArcsec  = ( s22 * r1 - s12 * r2) / det;  // arcsec/min → arcmin ci-dessous
-            double errAltArcsec = (-s12 * r1 + s11 * r2) / det;
-
-            // Convert arcsec → arcmin
-            result.ErrAzArcmin  = errAzArcsec  / 60.0;
-            result.ErrAltArcmin = errAltArcsec / 60.0;
-            result.IsValid      = true;
-
-            // ── 4. Conditioning ────────────────────────────────────────────
-            // Approximation via eigenvalue ratio of AtWA
-            double trace = s11 + s22;
-            double discr = Math.Sqrt(Math.Max(0, (s11 - s22) * (s11 - s22) + 4 * s12 * s12));
-            double lambda1 = (trace + discr) / 2.0;
-            double lambda2 = (trace - discr) / 2.0;
-            result.Conditioning = lambda2 > 1e-12 ? lambda1 / lambda2 : 9999.0;
-
-            // ── 5. Residual RMS ─────────────────────────────────────────────────
-            double sumResidSq = 0;
-            for (int i = 0; i < validRows.Count; i++)
+            var a = Matrix<double>.Build.Dense(rows.Count, 2);
+            var b = Vector<double>.Build.Dense(rows.Count);
+            double hemisphere = latitudeDeg < 0 ? -1 : 1;
+            for (int i = 0; i < rows.Count; i++)
             {
-                double predicted = dAz[i] * errAzArcsec + dAlt[i] * errAltArcsec;
-                double residual  = b[i] - predicted;
-                validRows[i].Residual = residual;
-                sumResidSq += residual * residual;
+                double weight = Math.Sqrt(rows[i].Weight);
+                a[i, 0] = -hemisphere * weight * DriftPerArcmin * Math.Cos(latitudeDeg * Math.PI / 180) * rows[i].CosHaResponse;
+                a[i, 1] = -hemisphere * weight * DriftPerArcmin * rows[i].SinHaResponse;
+                b[i] = weight * rows[i].DecDriftRaw;
             }
-            // In mas/min (×1000 for mas)
-            result.ResidualRmsMasPerMin = validRows.Count > 2
-                ? Math.Sqrt(sumResidSq / (validRows.Count - 2)) * 1000.0
-                : 0;
-
-            // ── 6. Measurement advice ──────────────────────────────────────────
-            result.MeasurementAdvice = BuildMeasurementAdvice(result.Conditioning, validRows, latitudeDeg);
-
+            // Solve the weighted design directly, not normal equations (which square the condition number).
+            var svd = a.Svd(true);
+            result.Conditioning = svd.S[1] > 0 ? svd.S[0] / svd.S[1] : double.PositiveInfinity;
+            if (!double.IsFinite(result.Conditioning) || result.Conditioning >= 1000)
+            {
+                result.ErrorMessage = "Unreliable geometry: observe near the meridian and to the East or West at low declination.";
+                return result;
+            }
+            var x = svd.Solve(b);
+            result.ErrAzArcmin = x[0];
+            result.ErrAltArcmin = x[1];
+            if (!double.IsFinite(x[0]) || !double.IsFinite(x[1]) || result.TotalArcmin > 60)
+            {
+                result.ErrorMessage = "Estimate outside the small-angle model: check calibration, guide rates and logs.";
+                return result;
+            }
+            double residualSum = 0, weightSum = 0;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                double residual = (b[i] - a[i, 0] * x[0] - a[i, 1] * x[1]) / Math.Sqrt(rows[i].Weight);
+                rows[i].Residual = residual;
+                residualSum += rows[i].Weight * residual * residual;
+                weightSum += rows[i].Weight;
+            }
+            if (rows.Count > 2)
+                result.ResidualRmsMasPerMin = 1000 * Math.Sqrt(residualSum / weightSum);
+            result.IsValid = true;
+            result.MeasurementAdvice = "Estimate assumes the calibration and guide displacements are accurate; flexure and backlash can bias it. "
+                + (rows.Count == 2 ? "Two sessions determine two components but cannot independently validate the fit. " : "")
+                + (result.Conditioning >= 300 ? "Geometry is weak: add a session near the meridian and one towards East or West. " : "")
+                + "Use low-declination targets and verify with PHD2 drift alignment before adjusting the mount.";
             return result;
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        // SESSION ROW CONSTRUCTION
-        // ══════════════════════════════════════════════════════════════════════
-
-        private List<PolarSessionRow> BuildSessionRows(List<GuidingSession> sessions)
+        private static PolarSessionRow BuildRow(GuidingSession session)
         {
-            var rows = new List<PolarSessionRow>();
-
-            foreach (var session in sessions)
-            {
-                var row = new PolarSessionRow
-                {
-                    SessionIndex = session.SessionIndex,
-                    StartTime    = session.StartTime,
-                    FrameCount   = session.RawPoints.Count(p => p.IsGuideStep && !p.IsDitherOrSettling),
-                };
-
-                // ── Duration / frames check ────────────────────────────────
-                var validPts = session.RawPoints
-                    .Where(p => p.IsGuideStep && !p.IsDitherOrSettling)
-                    .ToList();
-
-                if (validPts.Count < MinFrames)
-                {
-                    row.IsExcluded    = true;
-                    row.ExcludeReason = $"Too few frames ({validPts.Count} < {MinFrames})";
-                    rows.Add(row);
-                    continue;
-                }
-
-                double durationSec = (validPts.Last().Timestamp - validPts.First().Timestamp).TotalSeconds;
-                if (durationSec < MinSessionDurationSec)
-                {
-                    row.IsExcluded    = true;
-                    row.ExcludeReason = $"Session too short ({durationSec:F0} s < {MinSessionDurationSec} s)";
-                    rows.Add(row);
-                    continue;
-                }
-
-                // ── Sky position ───────────────────────────────────────────
-                // Prefer SessionInfo (more precise) then Calibration
-                double ha = double.NaN, dec = double.NaN, alt = double.NaN, az = double.NaN;
-
-                if (session.SessionInfo != null)
-                {
-                    ha  = session.SessionInfo.HourAngle * 15.0;  // heures → degrés
-                    dec = session.SessionInfo.DecDeg;
-                    alt = session.SessionInfo.AltDeg;
-                    az  = session.SessionInfo.AzDeg;
-                }
-                else if (session.Calibration != null)
-                {
-                    ha  = session.Calibration.HourAngle * 15.0;
-                    dec = session.Calibration.DecDeg;
-                    alt = session.Calibration.AltDeg;
-                    az  = session.Calibration.AzDeg;
-                }
-
-                if (double.IsNaN(ha) || double.IsNaN(dec))
-                {
-                    row.IsExcluded    = true;
-                    row.ExcludeReason = "No position metadata (HA/Dec absent from log)";
-                    rows.Add(row);
-                    continue;
-                }
-
-                row.HourAngle = ha;
-                row.DecDeg    = dec;
-                row.AltDeg    = alt;
-                row.AzDeg     = az;
-
-                // ── Detect PPEC learning phase ────────────────────────────
-                if (IsPpecLearning(session))
-                {
-                    row.IsExcluded    = true;
-                    row.ExcludeReason = "PPEC in learning phase — RA drift not representative";
-                    rows.Add(row);
-                    continue;
-                }
-
-                // ── DEC drift on mount curve (real mechanical drift) ────────
-                row.DecDriftRaw = ComputeDecDriftFromMountCurve(session);
-
-                // ── Weight = min(√frames, 50) ────────────────────────────────────
-                row.Weight = Math.Min(Math.Sqrt(row.FrameCount), MaxWeight);
-
-                rows.Add(row);
-            }
-
-            return rows;
+            var row = new PolarSessionRow { SessionIndex = session.SessionIndex, StartTime = session.StartTime };
+            PolarSessionRow Exclude(string reason) { row.IsExcluded = true; row.ExcludeReason = reason; return row; }
+            if (!double.IsFinite(session.PixelScale) || session.PixelScale <= 0)
+                return Exclude("Missing pixel scale (arcsec/pixel)");
+            var info = session.SessionInfo;
+            if (info == null || !double.IsFinite(info.HourAngle) || !double.IsFinite(info.DecDeg))
+                return Exclude("Missing session position (HA/Dec); an earlier calibration is not the current target");
+            if (Math.Abs(info.DecDeg) >= 85 || Math.Abs(info.HourAngle) > 12)
+                return Exclude("Position too close to celestial pole or invalid hour angle");
+            row.HourAngle = info.HourAngle * 15;
+            row.DecDeg = info.DecDeg;
+            row.AltDeg = info.AltDeg;
+            row.AzDeg = info.AzDeg;
+            // Current session parity already incorporates any meridian flip.
+            var parity = info.MountParity.Trim().TrimEnd(',').Split('/');
+            if (parity.Length != 2 || (parity[1] != "+" && parity[1] != "-"))
+                return Exclude("Unknown DEC parity: the direction of celestial drift cannot be determined");
+            double northSign = parity[1] == "+" ? 1 : -1;
+            var curve = session.MountCurve;
+            if (curve.Count == 0)
+                curve = new MountCurveService().ReconstructSession(session);
+            var points = SpectralSampling.LongestSegment(curve);
+            row.FrameCount = points.Count;
+            if (points.Count < 30) return Exclude("Fewer than 30 consecutive valid frames");
+            double minutes = (points[^1].Timestamp - points[0].Timestamp).TotalMinutes;
+            if (minutes < 2) return Exclude("Uninterrupted measurement shorter than 120 seconds");
+            if (points.Any(p => !double.IsFinite(p.DecMountPosition))) return Exclude("Non-finite reconstructed drift");
+            double ha0 = info.HourAngle * Math.PI / 12
+                + (points[0].Timestamp - session.StartTime).TotalMinutes * SiderealRadiansPerMinute;
+            var times = points.Select(p => (p.Timestamp - points[0].Timestamp).TotalMinutes).ToArray();
+            // Regression of the integrated geometry gives exactly the same time weighting
+            // as the measured slope, including long sessions and uneven exposure intervals.
+            row.CosHaResponse = Slope(times, times.Select(t =>
+                (Math.Sin(ha0 + SiderealRadiansPerMinute * t) - Math.Sin(ha0)) / SiderealRadiansPerMinute).ToArray());
+            row.SinHaResponse = Slope(times, times.Select(t =>
+                (Math.Cos(ha0) - Math.Cos(ha0 + SiderealRadiansPerMinute * t)) / SiderealRadiansPerMinute).ToArray());
+            row.DecDriftRaw = northSign * Slope(times, points.Select(p => p.DecMountPosition).ToArray());
+            row.Weight = Math.Min(Math.Sqrt(points.Count), 50);
+            return row;
         }
 
-        // ══════════════════════════════════════════════════════════════════════
-        // DEC DRIFT ON MOUNT CURVE (TRUE MECHANICAL DRIFT)
-        // ══════════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Computes the real DEC drift in arcsec/min from the reconstructed mount curve.
-        ///
-        /// WHY the mount curve and NOT rawPoints:
-        /// PHD2 actively guides DEC (algorithme Resist Switch ou similar) et maintient
-        /// l'erreur Dec brute (rawPoints.DecError) proche de zéro en permanence.
-        /// La régression sur rawPoints donne donc toujours ≈ 0, quelle que soit
-        /// la qualité de la mise en station — ce qui rend le calcul inutile.
-        ///
-        /// The reconstructed mount curve (MountCurvePoint.DecMountPosition) cumule
-        /// Position[n] = Erreur[n] + Correction[n-1], ce qui représente la dérive
-        /// MÉCANIQUE réelle que PHD2 a dû compenser. Sa pente est la dérive vraie.
-        /// </summary>
-        private static double ComputeDecDriftFromMountCurve(GuidingSession session)
+        internal static double Slope(double[] times, double[] values)
         {
-            if (session.MountCurve == null || session.MountCurve.Count < 10)
+            double meanT = times.Average(), meanY = values.Average();
+            double xx = 0, xy = 0;
+            for (int i = 0; i < times.Length; i++)
             {
-                // Fallback sur rawPoints si la courbe n'est pas disponible
-                return ComputeDecDriftRaw(
-                    session.RawPoints.Where(p => p.IsGuideStep && !p.IsDitherOrSettling).ToList());
+                double t = times[i] - meanT;
+                xx += t * t; xy += t * (values[i] - meanY);
             }
-
-            var clean = session.MountCurve
-                .Where(p => !p.IsDitherOrSettling)
-                .ToList();
-            if (clean.Count < 10)
-                return ComputeDecDriftRaw(
-                    session.RawPoints.Where(p => p.IsGuideStep && !p.IsDitherOrSettling).ToList());
-
-            double durationMin = (clean.Last().Timestamp - clean.First().Timestamp).TotalMinutes;
-            if (durationMin < 0.1) return 0;
-
-            int n = clean.Count;
-            double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-            for (int i = 0; i < n; i++)
-            {
-                double x = i;
-                double y = clean[i].DecMountPosition;
-                sumX  += x; sumY  += y;
-                sumXY += x * y; sumX2 += x * x;
-            }
-            double denom = n * sumX2 - sumX * sumX;
-            if (Math.Abs(denom) < 1e-10) return 0;
-
-            // slope en arcsec/frame → convertir en arcsec/min
-            double slope = (n * sumXY - sumX * sumY) / denom;
-            double frameIntervalMin = durationMin / Math.Max(1, n - 1);
-            return frameIntervalMin > 0 ? slope / frameIntervalMin : 0;
-        }
-
-        /// <summary>
-        /// Linear regression on raw DEC errors (rawPoints) — FALLBACK ONLY.
-        /// Do not use normally : PHD2 corrige activement la Dec, donc cette
-        /// valeur est toujours proche de zéro et ne reflète pas la dérive réelle.
-        /// </summary>
-        private static double ComputeDecDriftRaw(List<GuidingPoint> points)
-        {
-            if (points.Count < 2) return 0;
-
-            var t0 = points.First().Timestamp;
-            int n  = points.Count;
-
-            double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-            foreach (var p in points)
-            {
-                double x = (p.Timestamp - t0).TotalMinutes;
-                double y = p.DecError;
-                sumX  += x;
-                sumY  += y;
-                sumXY += x * y;
-                sumX2 += x * x;
-            }
-
-            double denom = n * sumX2 - sumX * sumX;
-            if (Math.Abs(denom) < 1e-10) return 0;
-
-            return (n * sumXY - sumX * sumY) / denom;  // arcsec/min
-        }
-
-        // ══════════════════════════════════════════════════════════════════════
-        // PPEC LEARNING DETECTION
-        // ══════════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Returns true if the session was in PPEC learning phase.
-        /// Indicateur : la valeur "AD PPEC aggressiveness" change dans l'en-tête.
-        /// Ici on utilise le flag que GuidingDataService pourrait stocker,
-        /// ou on le déduit des statistiques de dérive RA anormalement élevées.
-        /// </summary>
-        private static bool IsPpecLearning(GuidingSession session)
-        {
-            // Si GuidingDataService a parsé le flag PPEC et l'a stocké dans SessionInfo,
-            // on l'utilise directement. Ce champ est à ajouter à GuidingSessionInfo (P1).
-            // Pour l'instant : heuristique — si RA drift > 0.5 arcsec/min ET Dec < 10°,
-            // c'est suspect (phase d'apprentissage PPEC typique sur une cible à Dec~0°).
-            // TODO P1 : remplacer par session.SessionInfo.IsPpecLearning quand disponible.
-
-            if (session.Statistics == null) return false;
-
-            bool suspiciousRaDrift = Math.Abs(session.Statistics.RaDriftArcsecPerMin) > 0.5;
-            bool lowDec            = session.SessionInfo != null && Math.Abs(session.SessionInfo.DecDeg) < 10.0;
-
-            return suspiciousRaDrift && lowDec;
-        }
-
-        // ══════════════════════════════════════════════════════════════════════
-        // MEASUREMENT ADVICE
-        // ══════════════════════════════════════════════════════════════════════
-
-        private static string BuildMeasurementAdvice(
-            double conditioning,
-            List<PolarSessionRow> rows,
-            double latitudeDeg)
-        {
-            if (conditioning <= 300) return string.Empty;
-
-            // Analyse HA distribution pour savoir ce qui manque
-            var has  = rows.Select(r => r.HourAngle).ToList();
-            var decs = rows.Select(r => r.DecDeg).ToList();
-
-            bool hasLowDec   = decs.Any(d => Math.Abs(d) < 30);
-            bool hasEastSide = has.Any(h => h < -30);   // HA < −2h = côté Est
-            bool hasWestSide = has.Any(h => h >  30);   // HA > +2h = côté Ouest
-            bool hasNearMer  = has.Any(h => Math.Abs(h) < 20); // HA ≈ 0
-
-            if (!hasLowDec)
-                return "Poor conditioning — to improve precision, " +
-                       "observe a target at low declination (Dec < 30°). " +
-                       "The meridian (HA ≈ 0h) is ideal for isolating the altitude error.";
-
-            if (!hasEastSide)
-                return "Poor conditioning — to improve azimuth precision, " +
-                       "observe a target to the East (HA ≈ −3h to −5h, Dec < 30°). " +
-                       "Run the Guiding Assistant for at least 10 minutes.";
-
-            if (!hasWestSide)
-                return "Poor conditioning — to improve azimuth precision, " +
-                       "observe a target to the West (HA ≈ +3h to +5h, Dec < 30°). " +
-                       "Run the Guiding Assistant for at least 10 minutes.";
-
-            return $"Conditioning = {conditioning:F0} — diversify positions " +
-                   "(varied HA and Dec) to improve calculation reliability.";
-        }
-
-        // ══════════════════════════════════════════════════════════════════════
-        // RECONSTRUCTED LATITUDE (bonus)
-        // ══════════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Estimates the site latitude from PHD2 calibration data.
-        ///
-        /// Principe : lors d'une calibration, PHD2 déplace l'étoile guide en RA et DEC
-        /// et mesure les vitesses en px/s. Le rapport des vitesses dépend de la déclinaison
-        /// et de l'échelle de plaque. On peut en dériver la latitude si on dispose de
-        /// plusieurs calibrations à des déclinaisons différentes.
-        ///
-        /// Ici : estimateur simple basé sur la déclinaison de calibration et la vitesse
-        /// normalisée de guidage.
-        ///
-        /// Returns double.NaN if data is insufficient.
-        /// </summary>
-        public static double EstimateLatitudeFromCalibration(GuidingSession session)
-        {
-            var cal = session.Calibration;
-            if (cal == null) return double.NaN;
-
-            // PHD2 corrige automatiquement la vitesse RA pour la déclinaison : RA_rate_corr = RA_rate / cos(dec)
-            // La vitesse DEC est indépendante de la latitude (dans un premier ordre).
-            // La latitude est directement lue dans CalibrationSession.AltDeg si disponible.
-            if (cal.AltDeg != 0 && cal.AzDeg != 0)
-            {
-                // Conversion Alt/Az → latitude approchée (étoile polaire proche du pôle)
-                // Non applicable ici — on retourne AltDeg du site si disponible dans SessionInfo
-            }
-
-            if (session.SessionInfo != null && session.SessionInfo.AltDeg > 0)
-            {
-                // La latitude = altitude de l'objet au méridien + Dec − 90° ... trop approximatif.
-                // On retourne NaN et on laisse l'utilisateur saisir la valeur.
-            }
-
-            return double.NaN;  // Pas de déduction fiable sans Polaris visible
+            return xx > 0 ? xy / xx : 0;
         }
     }
 }
